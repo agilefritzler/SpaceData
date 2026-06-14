@@ -143,6 +143,48 @@
     .refresh-btn:hover { background: rgba(255,255,255,0.1); }
 
     a { color: #85b7eb; }
+
+    .pass-form { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .pass-form input {
+      flex: 1;
+      min-width: 180px;
+      background: rgba(255,255,255,0.05);
+      border: 0.5px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: #e8e8f0;
+      font-size: 14px;
+      outline: none;
+    }
+    .pass-form input:focus { border-color: rgba(255,255,255,0.35); }
+    .pass-form input::placeholder { color: #555; }
+    .pass-btn {
+      background: rgba(55,138,221,0.2);
+      border: 0.5px solid rgba(55,138,221,0.4);
+      border-radius: 8px;
+      color: #85b7eb;
+      font-size: 13px;
+      padding: 8px 16px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .pass-btn:hover { background: rgba(55,138,221,0.35); }
+
+    .pass-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .pass-table th { color: #888; font-weight: 400; text-align: left; padding: 6px 8px; border-bottom: 0.5px solid rgba(255,255,255,0.08); }
+    .pass-table td { padding: 8px 8px; border-bottom: 0.5px solid rgba(255,255,255,0.05); color: #e8e8f0; }
+    .pass-table tr:last-child td { border-bottom: none; }
+    .pass-tag {
+      display: inline-block;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-weight: 500;
+    }
+    .pass-tag.high { background: rgba(29,158,117,0.2); color: #5dcaa5; }
+    .pass-tag.mid  { background: rgba(239,159,39,0.2);  color: #ef9f27; }
+    .pass-tag.low  { background: rgba(226,75,74,0.2);   color: #e24b4a; }
   </style>
 </head>
 <body>
@@ -174,6 +216,15 @@
     <p class="section-label">Who's in space right now</p>
     <div class="card">
       <div class="crew-grid" id="crew-grid"><span class="loading">Loading…</span></div>
+    </div>
+
+    <p class="section-label">ISS passes over your location</p>
+    <div class="card">
+      <div class="pass-form">
+        <input type="text" id="location-input" placeholder="City name or lat, lon (e.g. Denver or 39.7,-104.9)" />
+        <button class="pass-btn" onclick="lookupPasses()"><i class="ti ti-satellite"></i> Find passes</button>
+      </div>
+      <div id="passes-result"></div>
     </div>
 
     <p class="section-label">NASA astronomy picture of the day</p>
@@ -260,6 +311,150 @@
       } catch (e) {
         card.innerHTML = '<span class="error">Could not load NASA image.</span>';
       }
+    }
+
+    async function lookupPasses() {
+      const input = document.getElementById('location-input').value.trim();
+      const result = document.getElementById('passes-result');
+      if (!input) return;
+      result.innerHTML = '<span class="loading">Looking up location…</span>';
+
+      let lat, lon, locationName;
+
+      const coordMatch = input.match(/^(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)$/);
+      if (coordMatch) {
+        lat = parseFloat(coordMatch[1]);
+        lon = parseFloat(coordMatch[2]);
+        locationName = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
+      } else {
+        try {
+          const geo = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(input)}&format=json&limit=1`);
+          const gd = await geo.json();
+          if (!gd.length) { result.innerHTML = '<span class="error">City not found. Try a different name or use lat, lon.</span>'; return; }
+          lat = parseFloat(gd[0].lat);
+          lon = parseFloat(gd[0].lon);
+          locationName = gd[0].display_name.split(',').slice(0,2).join(',');
+        } catch(e) {
+          result.innerHTML = '<span class="error">Could not look up city. Try entering coordinates instead.</span>';
+          return;
+        }
+      }
+
+      result.innerHTML = '<span class="loading">Calculating passes…</span>';
+      try {
+        const r = await fetch(`https://api.wheretheiss.at/v1/satellites/25544/tles`);
+        const tleData = await r.json();
+        const passes = computePasses(tleData.header, tleData.tle1, tleData.tle2, lat, lon);
+        if (!passes.length) {
+          result.innerHTML = '<span class="loading">No passes found in the next 7 days.</span>';
+          return;
+        }
+        result.innerHTML = `
+          <p style="font-size:12px;color:#888;margin-bottom:10px;">Next passes over <strong style="color:#e8e8f0;">${locationName}</strong></p>
+          <table class="pass-table">
+            <thead><tr>
+              <th>Date</th><th>Time (local)</th><th>Duration</th><th>Max elevation</th>
+            </tr></thead>
+            <tbody>${passes.slice(0,6).map(p => {
+              const dt = new Date(p.time * 1000);
+              const tag = p.maxEl >= 40 ? 'high' : p.maxEl >= 20 ? 'mid' : 'low';
+              const label = p.maxEl >= 40 ? 'High' : p.maxEl >= 20 ? 'Medium' : 'Low';
+              return `<tr>
+                <td>${dt.toLocaleDateString([], {weekday:'short', month:'short', day:'numeric'})}</td>
+                <td>${dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</td>
+                <td>${Math.round(p.duration / 60)} min</td>
+                <td><span class="pass-tag ${tag}">${label} (${Math.round(p.maxEl)}°)</span></td>
+              </tr>`;
+            }).join('')}</tbody>
+          </table>
+          <p style="font-size:11px;color:#555;margin-top:8px;">Elevation: how high the ISS gets above your horizon. Higher = easier to spot.</p>
+        `;
+      } catch(e) {
+        result.innerHTML = '<span class="error">Could not calculate passes. Please try again.</span>';
+      }
+    }
+
+    function computePasses(header, tle1, tle2, lat, lon) {
+      const DEG = Math.PI / 180;
+      const mu = 398600.4418;
+      const Re = 6371;
+
+      function parseTLE(t1, t2) {
+        const inc = parseFloat(t2.substring(8,16)) * DEG;
+        const raan = parseFloat(t2.substring(17,25)) * DEG;
+        const eccStr = '0.' + t2.substring(26,33).trim();
+        const ecc = parseFloat(eccStr);
+        const argp = parseFloat(t2.substring(34,42)) * DEG;
+        const M0 = parseFloat(t2.substring(43,51)) * DEG;
+        const n = parseFloat(t2.substring(52,63)) * 2 * Math.PI / 86400;
+        const epoch = tleEpoch(t1);
+        return {inc, raan, ecc, argp, M0, n, epoch};
+      }
+
+      function tleEpoch(t1) {
+        const y2 = parseInt(t1.substring(18,20));
+        const yr = y2 < 57 ? 2000 + y2 : 1900 + y2;
+        const day = parseFloat(t1.substring(20,32));
+        const jan1 = Date.UTC(yr, 0, 1) / 1000;
+        return jan1 + (day - 1) * 86400;
+      }
+
+      function solveKepler(M, e) {
+        let E = M;
+        for (let i = 0; i < 10; i++) E = M + e * Math.sin(E);
+        return E;
+      }
+
+      function issECI(t, orb) {
+        const dt = t - orb.epoch;
+        const M = orb.M0 + orb.n * dt;
+        const E = solveKepler(M % (2*Math.PI), orb.ecc);
+        const nu = 2 * Math.atan2(Math.sqrt(1+orb.ecc)*Math.sin(E/2), Math.sqrt(1-orb.ecc)*Math.cos(E/2));
+        const a = Math.pow(mu / (orb.n * orb.n / (2*Math.PI/86400 * 2*Math.PI/86400)), 1/3) * 1000;
+        const r = a * (1 - orb.ecc * Math.cos(E)) / 1000;
+        const u = nu + orb.argp;
+        const x = r*(Math.cos(orb.raan)*Math.cos(u) - Math.sin(orb.raan)*Math.sin(u)*Math.cos(orb.inc));
+        const y = r*(Math.sin(orb.raan)*Math.cos(u) + Math.cos(orb.raan)*Math.sin(u)*Math.cos(orb.inc));
+        const z = r*(Math.sin(orb.inc)*Math.sin(u));
+        return {x, y, z};
+      }
+
+      function elevation(t, orb, obsLat, obsLon) {
+        const GMST0 = 280.46061837;
+        const gmst = (GMST0 + 360.98564736629 * ((t - 946728000) / 86400)) * DEG;
+        const theta = gmst + obsLon * DEG;
+        const clat = Math.cos(obsLat * DEG), slat = Math.sin(obsLat * DEG);
+        const cth = Math.cos(theta), sth = Math.sin(theta);
+        const ox = Re * clat * cth, oy = Re * clat * sth, oz = Re * slat;
+        const eci = issECI(t, orb);
+        const dx = eci.x - ox, dy = eci.y - oy, dz = eci.z - oz;
+        const rs = Math.sin(obsLat*DEG)*cth*dx + Math.sin(obsLat*DEG)*sth*dy - Math.cos(obsLat*DEG)*dz;
+        const re2 = Math.cos(obsLat*DEG)*cth*dx + Math.cos(obsLat*DEG)*sth*dy + Math.sin(obsLat*DEG)*dz;
+        const rn = -Math.sin(theta)*dx + Math.cos(theta)*dy;
+        const range = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        const el = Math.asin((Math.cos(obsLat*DEG)*(cth*dx+sth*dy) + Math.sin(obsLat*DEG)*dz) / range) / DEG;
+        return el;
+      }
+
+      const orb = parseTLE(tle1, tle2);
+      const now = Math.floor(Date.now() / 1000);
+      const step = 60;
+      const passes = [];
+      let inPass = false, passStart = 0, maxEl = 0, passMaxT = 0;
+
+      for (let t = now; t < now + 7*86400; t += step) {
+        const el = elevation(t, orb, lat, lon);
+        if (el > 10) {
+          if (!inPass) { inPass = true; passStart = t; maxEl = el; passMaxT = t; }
+          else if (el > maxEl) { maxEl = el; passMaxT = t; }
+        } else {
+          if (inPass) {
+            passes.push({ time: passStart, duration: t - passStart, maxEl });
+            inPass = false; maxEl = 0;
+          }
+        }
+      }
+      return passes;
     }
 
     function loadAll() { loadISS(); loadCrew(); loadAPOD(); }
