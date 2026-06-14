@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Live Space Dashboard</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -61,14 +62,15 @@
 
     .map-container {
       width: 100%;
-      height: 220px;
-      background: rgba(255,255,255,0.03);
+      height: 320px;
       border-radius: 8px;
       margin-top: 10px;
       overflow: hidden;
     }
 
-    svg.worldmap { width: 100%; height: 100%; }
+    #iss-map { width: 100%; height: 100%; }
+    .leaflet-container { background: #0a0a1a; }
+    .iss-marker-icon { font-size: 22px; line-height: 1; }
 
     .crew-grid {
       display: grid;
@@ -205,10 +207,7 @@
         <div class="stat"><p class="stat-label">Speed</p><p class="stat-value" id="iss-speed"></p></div>
       </div>
       <div class="map-container">
-        <svg class="worldmap" viewBox="0 0 800 400" xmlns="http://www.w3.org/2000/svg" id="world-svg">
-          <rect width="800" height="400" fill="rgba(255,255,255,0.03)"/>
-          <text x="400" y="200" text-anchor="middle" fill="#555" font-size="13">Loading map…</text>
-        </svg>
+        <div id="iss-map"></div>
       </div>
       <p class="hint">Positions update every ~10 seconds aboard the ISS</p>
     </div>
@@ -233,6 +232,7 @@
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js"></script>
   <script>
     function initials(name) {
       return name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
@@ -252,27 +252,43 @@
       }
     }
 
-    function drawMap(lat, lon) {
-      const svg = document.getElementById('world-svg');
-      const W = 800, H = 400;
-      const x = ((lon + 180) / 360) * W;
-      const y = ((90 - lat) / 180) * H;
+    let issMap = null;
+    let issMarker = null;
 
-      svg.innerHTML = `
-        <rect width="${W}" height="${H}" fill="rgba(255,255,255,0.02)" rx="6"/>
-        <line x1="0" y1="${H/2}" x2="${W}" y2="${H/2}" stroke="rgba(255,255,255,0.1)" stroke-width="0.5"/>
-        <line x1="${W/2}" y1="0" x2="${W/2}" y2="${H}" stroke="rgba(255,255,255,0.1)" stroke-width="0.5"/>
-        ${[...Array(5)].map((_, i) => { const yy = H/6*(i+1); return `<line x1="0" y1="${yy}" x2="${W}" y2="${yy}" stroke="rgba(255,255,255,0.05)" stroke-width="0.3" stroke-dasharray="4,8"/>`; }).join('')}
-        ${[...Array(7)].map((_, i) => { const xx = W/8*(i+1); return `<line x1="${xx}" y1="0" x2="${xx}" y2="${H}" stroke="rgba(255,255,255,0.05)" stroke-width="0.3" stroke-dasharray="4,8"/>`; }).join('')}
-        <text x="4" y="14" fill="#555" font-size="10">90°N</text>
-        <text x="4" y="${H/2 - 2}" fill="#555" font-size="10">0°</text>
-        <text x="4" y="${H - 4}" fill="#555" font-size="10">90°S</text>
-        <text x="2" y="${H - 4}" fill="#555" font-size="10" text-anchor="start">180°W</text>
-        <text x="${W - 2}" y="${H - 4}" fill="#555" font-size="10" text-anchor="end">180°E</text>
-        <circle cx="${x}" cy="${y}" r="12" fill="#E24B4A" opacity="0.2"/>
-        <circle cx="${x}" cy="${y}" r="5" fill="#E24B4A"/>
-        <text x="${x + 12}" y="${y + 4}" fill="#E24B4A" font-size="12" font-weight="500">ISS</text>
-      `;
+    function initMap(lat, lon) {
+      issMap = L.map('iss-map', {
+        center: [lat, lon],
+        zoom: 2,
+        zoomControl: true,
+        attributionControl: true
+      });
+
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '© OpenStreetMap © CARTO',
+        subdomains: 'abcd',
+        maxZoom: 8,
+        minZoom: 1
+      }).addTo(issMap);
+
+      const issIcon = L.divIcon({
+        html: '<div style="font-size:28px;line-height:1;filter:drop-shadow(0 0 6px #e24b4a);">🛸</div>',
+        className: '',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+
+      issMarker = L.marker([lat, lon], { icon: issIcon })
+        .addTo(issMap)
+        .bindPopup('<b>ISS</b><br>International Space Station');
+    }
+
+    function drawMap(lat, lon) {
+      if (!issMap) {
+        initMap(lat, lon);
+      } else {
+        issMarker.setLatLng([lat, lon]);
+        issMap.panTo([lat, lon]);
+      }
     }
 
     async function loadCrew() {
@@ -340,121 +356,43 @@
         }
       }
 
-      result.innerHTML = '<span class="loading">Calculating passes…</span>';
+      result.innerHTML = '<span class="loading">Fetching pass predictions…</span>';
       try {
-        const r = await fetch(`https://api.wheretheiss.at/v1/satellites/25544/tles`);
-        const tleData = await r.json();
-        const passes = computePasses(tleData.header, tleData.tle1, tleData.tle2, lat, lon);
+        const r = await fetch(`https://iss-api.polluxlabs.io/iss-pass?lat=${lat}&lon=${lon}&n=8`);
+        const passes = await r.json();
         if (!passes.length) {
-          result.innerHTML = '<span class="loading">No passes found in the next 7 days.</span>';
+          result.innerHTML = '<span class="loading">No passes found.</span>';
           return;
         }
         result.innerHTML = `
           <p style="font-size:12px;color:#888;margin-bottom:10px;">Next passes over <strong style="color:#e8e8f0;">${locationName}</strong></p>
           <table class="pass-table">
             <thead><tr>
-              <th>Date</th><th>Time (local)</th><th>Duration</th><th>Max elevation</th>
+              <th>Date</th><th>Time (local)</th><th>Duration</th><th>Max elevation</th><th>Visible?</th>
             </tr></thead>
-            <tbody>${passes.slice(0,6).map(p => {
-              const dt = new Date(p.time * 1000);
-              const tag = p.maxEl >= 40 ? 'high' : p.maxEl >= 20 ? 'mid' : 'low';
-              const label = p.maxEl >= 40 ? 'High' : p.maxEl >= 20 ? 'Medium' : 'Low';
+            <tbody>${passes.map(p => {
+              const dt = new Date(p.rise_time * 1000);
+              const el = p.max_elevation;
+              const tag = el >= 40 ? 'high' : el >= 20 ? 'mid' : 'low';
+              const label = el >= 40 ? 'High' : el >= 20 ? 'Medium' : 'Low';
+              const dur = Math.round(p.duration / 60);
+              const visible = p.visible
+                ? '<span style="color:#5dcaa5;">Yes ✓</span>'
+                : '<span style="color:#555;">No</span>';
               return `<tr>
                 <td>${dt.toLocaleDateString([], {weekday:'short', month:'short', day:'numeric'})}</td>
                 <td>${dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</td>
-                <td>${Math.round(p.duration / 60)} min</td>
-                <td><span class="pass-tag ${tag}">${label} (${Math.round(p.maxEl)}°)</span></td>
+                <td>${dur} min</td>
+                <td><span class="pass-tag ${tag}">${label} (${Math.round(el)}°)</span></td>
+                <td>${visible}</td>
               </tr>`;
             }).join('')}</tbody>
           </table>
-          <p style="font-size:11px;color:#555;margin-top:8px;">Elevation: how high the ISS gets above your horizon. Higher = easier to spot.</p>
+          <p style="font-size:11px;color:#555;margin-top:8px;">Elevation: how high the ISS gets above your horizon. "Visible" means the ISS is sunlit and your sky is dark enough to see it.</p>
         `;
       } catch(e) {
-        result.innerHTML = '<span class="error">Could not calculate passes. Please try again.</span>';
+        result.innerHTML = '<span class="error">Could not fetch passes. Please try again.</span>';
       }
-    }
-
-    function computePasses(header, tle1, tle2, lat, lon) {
-      const DEG = Math.PI / 180;
-      const mu = 398600.4418;
-      const Re = 6371;
-
-      function parseTLE(t1, t2) {
-        const inc = parseFloat(t2.substring(8,16)) * DEG;
-        const raan = parseFloat(t2.substring(17,25)) * DEG;
-        const eccStr = '0.' + t2.substring(26,33).trim();
-        const ecc = parseFloat(eccStr);
-        const argp = parseFloat(t2.substring(34,42)) * DEG;
-        const M0 = parseFloat(t2.substring(43,51)) * DEG;
-        const n = parseFloat(t2.substring(52,63)) * 2 * Math.PI / 86400;
-        const epoch = tleEpoch(t1);
-        return {inc, raan, ecc, argp, M0, n, epoch};
-      }
-
-      function tleEpoch(t1) {
-        const y2 = parseInt(t1.substring(18,20));
-        const yr = y2 < 57 ? 2000 + y2 : 1900 + y2;
-        const day = parseFloat(t1.substring(20,32));
-        const jan1 = Date.UTC(yr, 0, 1) / 1000;
-        return jan1 + (day - 1) * 86400;
-      }
-
-      function solveKepler(M, e) {
-        let E = M;
-        for (let i = 0; i < 10; i++) E = M + e * Math.sin(E);
-        return E;
-      }
-
-      function issECI(t, orb) {
-        const dt = t - orb.epoch;
-        const M = orb.M0 + orb.n * dt;
-        const E = solveKepler(M % (2*Math.PI), orb.ecc);
-        const nu = 2 * Math.atan2(Math.sqrt(1+orb.ecc)*Math.sin(E/2), Math.sqrt(1-orb.ecc)*Math.cos(E/2));
-        const a = Math.pow(mu / (orb.n * orb.n / (2*Math.PI/86400 * 2*Math.PI/86400)), 1/3) * 1000;
-        const r = a * (1 - orb.ecc * Math.cos(E)) / 1000;
-        const u = nu + orb.argp;
-        const x = r*(Math.cos(orb.raan)*Math.cos(u) - Math.sin(orb.raan)*Math.sin(u)*Math.cos(orb.inc));
-        const y = r*(Math.sin(orb.raan)*Math.cos(u) + Math.cos(orb.raan)*Math.sin(u)*Math.cos(orb.inc));
-        const z = r*(Math.sin(orb.inc)*Math.sin(u));
-        return {x, y, z};
-      }
-
-      function elevation(t, orb, obsLat, obsLon) {
-        const GMST0 = 280.46061837;
-        const gmst = (GMST0 + 360.98564736629 * ((t - 946728000) / 86400)) * DEG;
-        const theta = gmst + obsLon * DEG;
-        const clat = Math.cos(obsLat * DEG), slat = Math.sin(obsLat * DEG);
-        const cth = Math.cos(theta), sth = Math.sin(theta);
-        const ox = Re * clat * cth, oy = Re * clat * sth, oz = Re * slat;
-        const eci = issECI(t, orb);
-        const dx = eci.x - ox, dy = eci.y - oy, dz = eci.z - oz;
-        const rs = Math.sin(obsLat*DEG)*cth*dx + Math.sin(obsLat*DEG)*sth*dy - Math.cos(obsLat*DEG)*dz;
-        const re2 = Math.cos(obsLat*DEG)*cth*dx + Math.cos(obsLat*DEG)*sth*dy + Math.sin(obsLat*DEG)*dz;
-        const rn = -Math.sin(theta)*dx + Math.cos(theta)*dy;
-        const range = Math.sqrt(dx*dx+dy*dy+dz*dz);
-        const el = Math.asin((Math.cos(obsLat*DEG)*(cth*dx+sth*dy) + Math.sin(obsLat*DEG)*dz) / range) / DEG;
-        return el;
-      }
-
-      const orb = parseTLE(tle1, tle2);
-      const now = Math.floor(Date.now() / 1000);
-      const step = 60;
-      const passes = [];
-      let inPass = false, passStart = 0, maxEl = 0, passMaxT = 0;
-
-      for (let t = now; t < now + 7*86400; t += step) {
-        const el = elevation(t, orb, lat, lon);
-        if (el > 10) {
-          if (!inPass) { inPass = true; passStart = t; maxEl = el; passMaxT = t; }
-          else if (el > maxEl) { maxEl = el; passMaxT = t; }
-        } else {
-          if (inPass) {
-            passes.push({ time: passStart, duration: t - passStart, maxEl });
-            inPass = false; maxEl = 0;
-          }
-        }
-      }
-      return passes;
     }
 
     function loadAll() { loadISS(); loadCrew(); loadAPOD(); }
